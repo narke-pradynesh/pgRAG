@@ -91,17 +91,13 @@ def build_faiss_index(embeddings_array: np.ndarray):
     quantizer = faiss.IndexFlatIP(dimension)
     base_index = faiss.IndexIVFFlat(quantizer, dimension, nlist, faiss.METRIC_INNER_PRODUCT)
 
-    # Wrap in IDMap — this is what makes reconstruct() work after save/load
-    index = faiss.IndexIDMap(base_index)
 
-    # Train the base IVF index
+    index = faiss.IndexIDMap(base_index)
     base_index.train(embeddings_array)
 
-    # Add with explicit IDs (0, 1, 2, ...)
+
     ids = np.arange(n_vectors, dtype=np.int64)
     index.add_with_ids(embeddings_array, ids)
-
-    # Set nprobe on the underlying IVF index
     base_index.nprobe = 10
 
     print(f"FAISS index built: {index.ntotal} vectors, {nlist} clusters")
@@ -122,7 +118,7 @@ def build_vectorstore(index, chunks):
     )
     return vectorstore
 
-    #Save and load faiss index
+    # Save and load faiss index
 
 def get_vectorstore(pdf_path: str, index_path: str):
     if os.path.exists(index_path):
@@ -132,7 +128,6 @@ def get_vectorstore(pdf_path: str, index_path: str):
             embeddings=embeddings,
             allow_dangerous_deserialization=True
         )
-        # Re-set nprobe on the underlying IVF index after load
         set_nprobe(vectorstore.index)
         print(f"Index loaded: {vectorstore.index.ntotal} vectors")
     else:
