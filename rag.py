@@ -187,6 +187,9 @@ def build_rag_chain(vectorstore):
 
     return rag_chain
 
+def load_rag():
+    vectorstore = get_vectorstore(PDF_PATH, INDEX_PATH)
+    return build_rag_chain(vectorstore)
 
 # Main
 def main():
