@@ -2,12 +2,12 @@ import os
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+from dotenv import load_dotenv
+load_dotenv()
 
 Model = ChatOpenAI(
     model="nvidia/nemotron-3-nano-30b-a3b:free",
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY
 )
 
 def get_water_footprint_advice(keyword: str) -> str:

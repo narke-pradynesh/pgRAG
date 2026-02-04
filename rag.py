@@ -1,4 +1,7 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import faiss
 import numpy as np
 import multiprocessing
@@ -13,12 +16,15 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
+
 PDF_PATH = "docs.pdf"
 INDEX_PATH = "faiss_index"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+from dotenv import load_dotenv
+load_dotenv()
 
 
- # Embedding Wrapper
+# Embedding Wrapper
 class MiniLMEmbeddings(Embeddings):
     def __init__(self, model: SentenceTransformer):
         self.model = model
@@ -34,23 +40,25 @@ class MiniLMEmbeddings(Embeddings):
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
 
-model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu"
-                                                                             "")
+model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu")
 embeddings = MiniLMEmbeddings(model)
 
 
-    # FAISS Helpers
+# FAISS Helpers
 def set_nprobe(index, nprobe: int = 10):
-    if hasattr(index, 'sub_index'):
-        set_nprobe(index.sub_index, nprobe)
+    """Recursively set nprobe on the underlying IVF index"""
+    if isinstance(index, faiss.IndexIDMap):
+        set_nprobe(index.index, nprobe)
+    elif isinstance(index, faiss.IndexPreTransform):
+        set_nprobe(index.index, nprobe)
     elif hasattr(index, 'nprobe'):
         index.nprobe = nprobe
-        print(f"nprobe set to {nprobe}")
+        print(f" nprobe set to {nprobe}")
     else:
-        print("Warning: could not find an IVF index to set nprobe on.")
+        print(f"Warning: Index type {type(index).__name__} does not support nprobe")
 
 
-    # Load and split into chunks
+# Load and split into chunks
 def load_and_chunk(pdf_path: str):
     loader = PyMuPDFLoader(pdf_path)
     raw_docs = loader.load()
@@ -65,8 +73,7 @@ def load_and_chunk(pdf_path: str):
     return chunks
 
 
-    # Create Embeddings
-
+# Create Embeddings
 def create_embeddings(chunks: list):
     texts = [chunk.page_content for chunk in chunks]
     embeddings_array = model.encode(
@@ -79,33 +86,37 @@ def create_embeddings(chunks: list):
     return embeddings_array
 
 
-    # Build FAISS Index
-
+# Build FAISS Index 
 def build_faiss_index(embeddings_array: np.ndarray):
-    faiss.omp_set_num_threads(multiprocessing.cpu_count())
 
-    dimension = embeddings_array.shape[1]       # 384
+    num_threads = min(8, multiprocessing.cpu_count())
+    faiss.omp_set_num_threads(num_threads)
+
+    dimension = embeddings_array.shape[1]  # 384
     n_vectors = len(embeddings_array)
-    nlist = max(1, int(np.sqrt(n_vectors)))
 
+    nlist = max(1, min(int(np.sqrt(n_vectors)), n_vectors // 39))
+    
+    print(f"Building index with {n_vectors} vectors, {nlist} clusters, {num_threads} threads")
+
+    # Create IVF index
     quantizer = faiss.IndexFlatIP(dimension)
-    base_index = faiss.IndexIVFFlat(quantizer, dimension, nlist, faiss.METRIC_INNER_PRODUCT)
+    ivf_index = faiss.IndexIVFFlat(quantizer, dimension, nlist, faiss.METRIC_INNER_PRODUCT)
+    
+    print("Training index...")
+    ivf_index.train(embeddings_array)
 
-
-    index = faiss.IndexIDMap(base_index)
-    base_index.train(embeddings_array)
-
+    ivf_index.nprobe = min(10, nlist) 
+    index = faiss.IndexIDMap(ivf_index)
 
     ids = np.arange(n_vectors, dtype=np.int64)
     index.add_with_ids(embeddings_array, ids)
-    base_index.nprobe = 10
 
-    print(f"FAISS index built: {index.ntotal} vectors, {nlist} clusters")
+    print(f" FAISS index built: {index.ntotal} vectors")
     return index
 
 
-    # Build vectorstore
-
+# Build vectorstore
 def build_vectorstore(index, chunks):
     docstore_dict = {str(i): chunks[i] for i in range(len(chunks))}
     index_to_docstore_id = {i: str(i) for i in range(len(chunks))}
@@ -118,8 +129,8 @@ def build_vectorstore(index, chunks):
     )
     return vectorstore
 
-    # Save and load faiss index
 
+# Save and load faiss index
 def get_vectorstore(pdf_path: str, index_path: str):
     if os.path.exists(index_path):
         print(f"Loading existing index from '{index_path}'...")
@@ -128,8 +139,9 @@ def get_vectorstore(pdf_path: str, index_path: str):
             embeddings=embeddings,
             allow_dangerous_deserialization=True
         )
-        set_nprobe(vectorstore.index)
-        print(f"Index loaded: {vectorstore.index.ntotal} vectors")
+        # Set nprobe after loading
+        set_nprobe(vectorstore.index, nprobe=10)
+        print(f"✓ Index loaded: {vectorstore.index.ntotal} vectors")
     else:
         print("No saved index found. Building from scratch...")
         chunks = load_and_chunk(pdf_path)
@@ -138,12 +150,12 @@ def get_vectorstore(pdf_path: str, index_path: str):
         vectorstore = build_vectorstore(index, chunks)
 
         vectorstore.save_local(index_path)
-        print(f"Index saved to '{index_path}'")
+        print(f"✓ Index saved to '{index_path}'")
 
     return vectorstore
 
-    # RAG Chain
 
+# RAG Chain
 def build_rag_chain(vectorstore):
     retriever = vectorstore.as_retriever(
         search_type="similarity",
@@ -151,7 +163,7 @@ def build_rag_chain(vectorstore):
     )
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "Answer using  the context below. Use your additional knowledge if necessary\n\nContext: {context}"),
+        ("system", "Answer using the context below. Use your additional knowledge if necessary.\n\nContext: {context}"),
         ("human", "{question}")
     ])
 
@@ -160,8 +172,7 @@ def build_rag_chain(vectorstore):
 
     llm = ChatOpenAI(
         model="nvidia/nemotron-3-nano-30b-a3b:free",
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY
+        base_url="https://openrouter.ai/api/v1"
     )
 
     rag_chain = (
@@ -179,21 +190,31 @@ def build_rag_chain(vectorstore):
 
 # Main
 def main():
-    vectorstore = get_vectorstore(PDF_PATH, INDEX_PATH)
-    rag_chain = build_rag_chain(vectorstore)
+    try:
+        vectorstore = get_vectorstore(PDF_PATH, INDEX_PATH)
+        rag_chain = build_rag_chain(vectorstore)
 
-    print("\n RAG ready. Type your question (or 'quit' to exit) \n")
-    while True:
-        question = input("You: ").strip()
-        if question.lower() in ("quit", "exit", "q"):
-            break
-        if not question:
-            continue
+        print("\n✓ RAG ready. Type your question (or 'quit' to exit)\n")
+        while True:
+            question = input("You: ").strip()
+            if question.lower() in ("quit", "exit", "q"):
+                print("Goodbye!")
+                break
+            if not question:
+                continue
 
-        print("Assistant: ", end="", flush=True)
-        for chunk in rag_chain.stream(question):
-            print(chunk, end="", flush=True)
-        print("\n")
+            try:
+                print("Assistant: ", end="", flush=True)
+                for chunk in rag_chain.stream(question):
+                    print(chunk, end="", flush=True)
+                print("\n")
+            except Exception as e:
+                print(f"\n⚠ Error processing question: {e}\n")
+                
+    except Exception as e:
+        print(f"✗ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
