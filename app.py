@@ -2,12 +2,12 @@ import streamlit as st
 from rag import load_rag
 
 st.set_page_config(
-    page_title="Postgres Assistant",
+    page_title="pgRAG",
     layout = "wide"
 )
 
-st.title("Postgres Assistant")
-st.caption("Ask anything Postgres-related!")
+st.title("pgRAG")
+st.caption("Ask anything about PostgreSQL!")
 
 @st.cache_resource(show_time="Loading docs...")
 def get_rag_chain():
